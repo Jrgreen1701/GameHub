@@ -1,4 +1,7 @@
 import hashlib
+import re
+import colorsys
+import math
 import threading
 import psutil
 import pystray
@@ -6,6 +9,7 @@ import json
 import io
 import urllib.request
 import urllib.parse
+import webbrowser
 import uuid
 import base64
 import os
@@ -14,14 +18,14 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageTk, ImageGrab
 import customtkinter as ctk
 
 def resource_path(relative):
     return Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent)) / relative
 
 APP_NAME = 'GameHub'
-APP_VERSION = '3.8.0'
+APP_VERSION = '3.9.6'
 DATA_DIR = Path(os.environ.get('APPDATA', str(Path.home()))) / APP_NAME
 CONFIG = DATA_DIR / 'launchers.json'
 
@@ -109,6 +113,22 @@ ACCENT = '#758BFF'
 ACCENTS = {'Blue': '#758BFF', 'Purple': '#A78BFA', 'Green': '#43CFA8', 'Orange': '#F6A65C', 'Pink': '#F08AB8'}
 
 
+def theme_palette(accent):
+    """Tint dark surfaces with the chosen accent, without reducing readability."""
+    from colorsys import rgb_to_hsv
+    raw = accent.lstrip('#')
+    if len(raw) != 6:
+        raise ValueError('Expected a six-digit RGB color')
+    r, g, b = (int(raw[i:i+2], 16) for i in (0, 2, 4))
+    def blend(base, amount):
+        original = tuple(int(base[i:i+2], 16) for i in (1, 3, 5))
+        return '#' + ''.join(f'{round(a * (1 - amount) + c * amount):02X}' for a, c in zip(original, (r,g,b)))
+    return dict(bg=blend('#0B0E16', .10), sidebar=blend('#101521', .16),
+                panel=blend('#141A27', .18), tile=blend('#1B2333', .22),
+                hover=blend('#26344D', .33), border=blend('#303B51', .36),
+                input_border=blend('#29354C', .38))
+
+
 def fetch_bytes(url, limit=8_000_000):
     if not url.startswith('https://'):
         raise ValueError('Only HTTPS images are supported')
@@ -164,10 +184,16 @@ class GameHub(ctk.CTk):
         self.favorites = set(prefs.get('favorites', []))
         self.launcher_order = list(prefs.get('order', []))
         self.accent_name = prefs.get('accent', 'Blue')
-        if self.accent_name not in ACCENTS:
+        if self.accent_name not in (*ACCENTS, 'Custom'):
             self.accent_name = 'Blue'
-        self.accent = prefs.get('custom_accent', ACCENTS[self.accent_name]) if self.accent_name == 'Custom' else ACCENTS[self.accent_name]
         self.custom_accent = prefs.get('custom_accent', '#758BFF')
+        try:
+            theme_palette(self.custom_accent)
+        except (ValueError, TypeError):
+            self.custom_accent = '#758BFF'
+        self.accent = self.custom_accent if self.accent_name == 'Custom' else ACCENTS[self.accent_name]
+        self.theme_colors = theme_palette(self.accent)
+        self.configure(fg_color=self.theme_colors['bg'])
         self._drag_start = None
         self._dragged = False
         self._suppress_click = False
@@ -182,7 +208,7 @@ class GameHub(ctk.CTk):
         self.after(1800, self.poll_running)
 
     def make_ui(self):
-        self.sidebar = ctk.CTkFrame(self, fg_color='#101521', width=225, corner_radius=0)
+        self.sidebar = ctk.CTkFrame(self, fg_color=self.theme_colors['sidebar'], width=225, corner_radius=0)
         self.sidebar.pack(side='left', fill='y')
         self.sidebar.pack_propagate(False)
         brand = ctk.CTkFrame(self.sidebar, fg_color='transparent')
@@ -196,37 +222,33 @@ class GameHub(ctk.CTk):
         self.nav_buttons = {}
         for label, symbol in [('All launchers', '▦'), ('Custom apps', '✦')]:
             btn = ctk.CTkButton(self.sidebar, text=f'{symbol}   {label}', anchor='w', height=44,
-                fg_color='transparent', hover_color=HOVER, text_color=TEXT, corner_radius=11,
+                fg_color='transparent', hover_color=self.theme_colors['hover'], text_color=TEXT, corner_radius=11,
                 font=('Segoe UI', 13), command=lambda x=label: self.set_mode(x))
             btn.pack(fill='x', padx=13, pady=4)
             self.nav_buttons[label] = btn
         ctk.CTkFrame(self.sidebar, height=1, fg_color='#283044').pack(fill='x', padx=22, pady=25)
         self.add_button = ctk.CTkButton(self.sidebar, text='+  Add launcher', height=43, corner_radius=12,
-            fg_color=self.accent, hover_color='#6075E7', text_color='#080C17', font=('Segoe UI', 13, 'bold'),
-            command=self.add).pack(fill='x', padx=17)
+            fg_color=self.accent, hover_color=self.theme_colors['hover'], text_color='#080C17', font=('Segoe UI', 13, 'bold'),
+            command=self.add)
+        self.add_button.pack(fill='x', padx=17)
         ctk.CTkButton(self.sidebar, text='↻  Rescan PC', height=40, fg_color='transparent',
             hover_color=HOVER, text_color=MUTED, command=self.scan).pack(fill='x', padx=17, pady=(10, 0))
         ctk.CTkButton(self.sidebar, text='↓  Check for updates', height=40,
             fg_color='transparent', hover_color=HOVER, text_color=MUTED,
             command=lambda: self.check_updates(silent=False)).pack(fill='x', padx=17, pady=(5, 0))
-        ctk.CTkLabel(self.sidebar, text='ACCENT COLOR', text_color=MUTED,
-                     font=('Segoe UI', 10)).pack(anchor='w', padx=23, pady=(22, 5))
-        self.accent_picker = ctk.CTkOptionMenu(
-            self.sidebar, values=list(ACCENTS) + ['Custom'], command=self.change_accent,
-            fg_color=PANEL, button_color='#33445E', button_hover_color='#435B7D',
-            text_color=TEXT, dropdown_fg_color=PANEL, dropdown_text_color=TEXT,
-            width=183, height=34, corner_radius=9)
-        self.accent_picker.pack(padx=17)
-        self.accent_picker.set(self.accent_name)
+        ctk.CTkLabel(self.sidebar, text='APPEARANCE', text_color=MUTED,
+                     font=('Segoe UI', 10, 'bold')).pack(anchor='w', padx=23, pady=(22, 6))
         self.color_button = ctk.CTkButton(
-            self.sidebar, text='🌈  Pick any color', height=30,
-            fg_color='transparent', border_width=1, border_color='#33445E',
-            text_color=TEXT, hover_color=HOVER, command=self.pick_custom_color)
-        self.color_button.pack(padx=17, pady=(7, 0), fill='x')
-        ctk.CTkLabel(self.sidebar, text='GAMEHUB  •  v3.7.0', text_color='#64728E',
+            self.sidebar, text='  Theme colors     ◉', anchor='w', height=39,
+            corner_radius=11, fg_color=self.theme_colors['panel'],
+            border_width=1, border_color=self.theme_colors['border'],
+            text_color=TEXT, hover_color=self.theme_colors['hover'],
+            command=self.open_theme_dialog)
+        self.color_button.pack(padx=17, fill='x')
+        ctk.CTkLabel(self.sidebar, text='GAMEHUB  •  v3.9.0', text_color='#64728E',
             font=('Segoe UI', 10)).pack(side='bottom', pady=24)
 
-        main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        main = ctk.CTkFrame(self, fg_color=self.theme_colors['bg'], corner_radius=0)
         main.pack(side='left', fill='both', expand=True)
         header = ctk.CTkFrame(main, fg_color='transparent')
         header.pack(fill='x', padx=32, pady=(32, 13))
@@ -258,14 +280,14 @@ class GameHub(ctk.CTk):
         bar.pack(fill='x', padx=32, pady=(7, 17))
         self.search = ctk.CTkEntry(bar, textvariable=self.filter,
             placeholder_text='⌕  Search launchers...',
-            height=43, corner_radius=12, fg_color=PANEL,
-            border_color='#29354C', text_color=TEXT,
+            height=43, corner_radius=12, fg_color=self.theme_colors['panel'],
+            border_color=self.theme_colors['input_border'], text_color=TEXT,
             font=('Segoe UI', 13))
         self.search.pack(side='left', fill='x', expand=True)
         self.count = ctk.CTkLabel(bar, text='', text_color=MUTED,
                                   font=('Segoe UI', 12))
         self.count.pack(side='right', padx=(17, 0))
-        self.scroll = ctk.CTkScrollableFrame(main, fg_color='transparent', corner_radius=0, scrollbar_button_color='#273044', scrollbar_button_hover_color='#3B4A66')
+        self.scroll = ctk.CTkScrollableFrame(main, fg_color='transparent', corner_radius=0, scrollbar_button_color=self.theme_colors['border'], scrollbar_button_hover_color='#3B4A66')
         self.scroll.pack(fill='both', expand=True, padx=22, pady=(0, 20))
         # Avoid re-rendering on layout changes: this caused continuous tile flashing.
         self._render_job = None
@@ -280,23 +302,127 @@ class GameHub(ctk.CTk):
             'custom_accent': self.custom_accent
         }, indent=2), encoding='utf-8')
 
-    def pick_custom_color(self):
-        from tkinter import colorchooser
-        color = colorchooser.askcolor(color=self.accent, title='GameHub accent color', parent=self)
-        if not color or not color[1]:
+    def open_theme_dialog(self):
+        """CustomTkinter themed HSV wheel with live preview and hex input."""
+        if getattr(self, '_theme_dialog', None) and self._theme_dialog.winfo_exists():
+            self._theme_dialog.lift()
             return
-        self.custom_accent = color[1]
-        self.change_accent('Custom')
-        self.accent_picker.set('Custom')
+        dialog = ctk.CTkToplevel(self)
+        self._theme_dialog = dialog
+        dialog.title('GameHub • Appearance')
+        dialog.geometry('450x570')
+        dialog.resizable(False, False)
+        dialog.configure(fg_color=self.theme_colors['bg'])
+        dialog.transient(self)
+        dialog.lift()
+        dialog.focus_force()
+        ctk.CTkLabel(dialog, text='Customize GameHub', text_color=TEXT,
+                     font=('Segoe UI Semibold', 22)).pack(anchor='w', padx=24, pady=(22, 2))
+        ctk.CTkLabel(dialog, text='Choose an accent color for your dashboard',
+                     text_color=MUTED, font=('Segoe UI', 12)).pack(anchor='w', padx=24)
+        swatches = ctk.CTkFrame(dialog, fg_color='transparent')
+        swatches.pack(fill='x', padx=23, pady=(18, 10))
+        selected = tk.StringVar(value=self.accent)
+        preview = ctk.CTkFrame(dialog, fg_color=self.theme_colors['panel'], corner_radius=12)
+        preview.pack(fill='x', padx=24, pady=(0, 12))
+        preview_label = ctk.CTkLabel(preview, text='●  Live color preview',
+                                     text_color=self.accent, font=('Segoe UI Semibold', 13))
+        preview_label.pack(pady=9)
+        wheel_frame = ctk.CTkFrame(dialog, fg_color='transparent')
+        wheel_frame.pack(pady=2)
+        dim = 220
+        wheel = tk.Canvas(wheel_frame, width=dim, height=dim, bd=0,
+                          highlightthickness=0, bg=self.theme_colors['bg'])
+        wheel.pack()
+        # Hue is the angle; saturation is the distance from the center.
+        image = Image.new('RGBA', (dim, dim), (0, 0, 0, 0))
+        pix = image.load()
+        center = (dim-1)/2
+        radius = center-4
+        for y in range(dim):
+            for x in range(dim):
+                dx, dy = x-center, center-y
+                r = math.hypot(dx, dy)
+                if r <= radius:
+                    h = (math.atan2(dy, dx)/(2*math.pi)) % 1
+                    sat = min(1.0, r/radius)
+                    rgb = colorsys.hsv_to_rgb(h, sat, 1.0)
+                    pix[x,y] = tuple(round(v*255) for v in rgb)+(255,)
+        photo = ImageTk.PhotoImage(image)
+        wheel._photo = photo
+        wheel.create_image(0, 0, image=photo, anchor='nw')
+        indicator = wheel.create_oval(0,0,0,0,outline='#101522',width=3)
+        def set_color(hex_color):
+            try:
+                raw=hex_color.strip().lstrip('#')
+                if len(raw)!=6: return
+                rgb=tuple(int(raw[i:i+2],16)/255 for i in (0,2,4))
+                hue, sat, val=colorsys.rgb_to_hsv(*rgb)
+                selected.set('#'+raw.upper())
+                preview_label.configure(text_color=selected.get())
+                preview.configure(border_width=1, border_color=selected.get())
+                wheel.coords(indicator,
+                             center+radius*sat*math.cos(hue*2*math.pi)-6,
+                             center-radius*sat*math.sin(hue*2*math.pi)-6,
+                             center+radius*sat*math.cos(hue*2*math.pi)+6,
+                             center-radius*sat*math.sin(hue*2*math.pi)+6)
+                if hex_entry.get().upper()!=selected.get().upper():
+                    hex_entry.delete(0,'end')
+                    hex_entry.insert(0,selected.get())
+            except (ValueError, tk.TclError):
+                pass
+        for name, color in ACCENTS.items():
+            ctk.CTkButton(swatches, text='', width=43, height=31,
+                          corner_radius=9, fg_color=color, hover_color=color,
+                          border_width=1, border_color='#72809B',
+                          command=lambda c=color: set_color(c)).pack(side='left', padx=4)
+        def pick(event):
+            dx,dy=event.x-center,center-event.y
+            hue=(math.atan2(dy,dx)/(2*math.pi))%1
+            sat=min(1,math.hypot(dx,dy)/radius)
+            rgb=colorsys.hsv_to_rgb(hue,sat,1)
+            set_color('#'+''.join(f'{round(v*255):02X}' for v in rgb))
+        wheel.bind('<Button-1>',pick)
+        wheel.bind('<B1-Motion>',pick)
+        line = ctk.CTkFrame(dialog, fg_color='transparent')
+        line.pack(fill='x',padx=26,pady=(14,10))
+        ctk.CTkLabel(line,text='HEX',text_color=MUTED,font=('Segoe UI',12)).pack(side='left')
+        hex_entry=ctk.CTkEntry(line,width=115,height=34,fg_color=self.theme_colors['panel'],
+                               border_color=self.theme_colors['border'],text_color=TEXT)
+        hex_entry.pack(side='left',padx=12)
+        hex_entry.bind('<Return>',lambda e:set_color(hex_entry.get()))
+        def apply():
+            set_color(hex_entry.get())
+            self.custom_accent=selected.get()
+            self.change_accent('Custom')
+            dialog.destroy()
+        buttons=ctk.CTkFrame(dialog,fg_color='transparent')
+        buttons.pack(fill='x',padx=24,pady=(7,0))
+        ctk.CTkButton(buttons,text='Cancel',fg_color=self.theme_colors['panel'],
+                      hover_color=self.theme_colors['hover'],width=135,
+                      command=dialog.destroy).pack(side='left')
+        ctk.CTkButton(buttons,text='Apply theme',fg_color=self.accent,
+                      hover_color=self.theme_colors['hover'],width=170,
+                      command=apply).pack(side='right')
+        set_color(self.accent)
+
+    def pick_custom_color(self):
+        self.open_theme_dialog()
 
     def change_accent(self, name):
         self.accent_name = name
         self.accent = self.custom_accent if name == 'Custom' else ACCENTS[name]
+        self.theme_colors = theme_palette(self.accent)
         self.save_preferences()
-        self.logo_slider.configure(progress_color=self.accent)
-        self.logo_switch.configure(progress_color=self.accent)
-        self.add_button.configure(fg_color=self.accent)
-        self.render()
+        # Rebuild the dashboard so the background, sidebar, search field and tiles
+        # all receive the new color rather than changing only hover highlights.
+        if self._render_job is not None:
+            self.after_cancel(self._render_job)
+            self._render_job = None
+        for child in self.winfo_children():
+            child.destroy()
+        self.configure(fg_color=self.theme_colors['bg'])
+        self.make_ui()
 
     def toggle_favorite(self, original):
         if original in self.favorites:
@@ -596,169 +722,6 @@ public class ShellJumbo {
         (DATA_DIR / 'custom_icons.json').write_text(json.dumps(self.custom_icons, indent=2), encoding='utf-8')
         self.render()
 
-    def search_logo(self, original):
-        """Image search uses Wikimedia Commons, or optional Google CSE API credentials."""
-        window = ctk.CTkToplevel(self)
-        window.title('Find logo — ' + self.renamed.get(original, original))
-        window.geometry('890x560')
-        window.minsize(720, 470)
-        window.configure(fg_color=BG)
-        window.transient(self)
-        window.lift()
-        window._images = []
-        window._results = []
-        window._chosen = None
-        window._generation = 0
-
-        heading = ctk.CTkLabel(window, text='Find a logo', font=('Segoe UI Semibold', 22), text_color=TEXT)
-        heading.pack(anchor='w', padx=20, pady=(15, 8))
-        top = ctk.CTkFrame(window, fg_color='transparent')
-        top.pack(fill='x', padx=20)
-        query = ctk.CTkEntry(top, placeholder_text='Search logo images', height=38)
-        query.insert(0, self.renamed.get(original, original) + ' logo')
-        query.pack(side='left', fill='x', expand=True, padx=(0, 8))
-        status = ctk.CTkLabel(window, text='Search public images from Wikimedia Commons.',
-                              text_color=MUTED, anchor='w')
-        status.pack(fill='x', padx=20, pady=(5, 9))
-        body = ctk.CTkFrame(window, fg_color='transparent')
-        body.pack(fill='both', expand=True, padx=20, pady=(0, 18))
-        grid = ctk.CTkScrollableFrame(body, fg_color=PANEL, corner_radius=12)
-        grid.pack(side='left', fill='both', expand=True, padx=(0, 12))
-        grid.grid_columnconfigure((0, 1, 2), weight=1)
-        side = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=12, width=245)
-        side.pack(side='right', fill='y')
-        side.pack_propagate(False)
-        ctk.CTkLabel(side, text='Preview', text_color=TEXT,
-                     font=('Segoe UI Semibold', 16)).pack(pady=(18, 8))
-        preview = ctk.CTkLabel(side, text='Select an image', text_color=MUTED,
-                               width=210, height=220)
-        preview.pack(padx=10, pady=6)
-        details = ctk.CTkLabel(side, text='', wraplength=215, text_color=MUTED)
-        details.pack(padx=12, pady=5)
-        apply_btn = ctk.CTkButton(side, text='Use this logo', state='disabled',
-                                  fg_color=self.accent)
-        apply_btn.pack(side='bottom', fill='x', padx=16, pady=18)
-        window._images = []
-        def choose(index):
-            if index >= len(window._results):
-                return
-            window._chosen = index
-            item = window._results[index]
-            details.configure(text=item['title'][:75] + '\\nSource: ' + item['source'])
-            img = item.get('image')
-            if img is not None:
-                image = ctk.CTkImage(light_image=img, dark_image=img, size=(200, 200))
-                window._images.append(image)
-                preview.configure(image=image, text='')
-            apply_btn.configure(state='normal')
-        def apply():
-            idx = window._chosen
-            if idx is None:
-                return
-            item = window._results[idx]
-            try:
-                data = fetch_bytes(item['url'], limit=8_000_000)
-                with Image.open(io.BytesIO(data)) as img:
-                    img.load()
-                    if img.width * img.height > 25_000_000:
-                        raise ValueError('Image is too large')
-                    img = img.convert('RGBA')
-                    img.thumbnail((512, 512), Image.Resampling.LANCZOS)
-                    DATA_DIR.mkdir(parents=True, exist_ok=True)
-                    icons_dir = DATA_DIR / 'downloaded_icons'
-                    icons_dir.mkdir(exist_ok=True)
-                    destination = icons_dir / (uuid.uuid4().hex + '.png')
-                    img.save(destination)
-                self.custom_icons[original] = str(destination)
-                (DATA_DIR / 'custom_icons.json').write_text(
-                    json.dumps(self.custom_icons, indent=2), encoding='utf-8')
-                window.destroy()
-                self.render()
-            except Exception as error:
-                messagebox.showerror('Download failed', str(error), parent=window)
-        apply_btn.configure(command=apply)
-        def search():
-            term = query.get().strip()
-            if not term:
-                return
-            window._generation += 1
-            generation = window._generation
-            window._chosen = None
-            window._results = []
-            window._images = []
-            for child in grid.winfo_children():
-                child.destroy()
-            preview.configure(text='Select an image', image=None)
-            details.configure(text='')
-            apply_btn.configure(state='disabled')
-            status.configure(text='Searching for ' + term + '...')
-            def worker():
-                try:
-                    # Optional Google Programmable Search credentials in user app-data.
-                    config_path = DATA_DIR / 'google_image_search.json'
-                    credentials = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
-                    if credentials.get('api_key') and credentials.get('cx'):
-                        args = urllib.parse.urlencode({
-                            'key': credentials['api_key'], 'cx': credentials['cx'],
-                            'q': term, 'searchType': 'image', 'num': 10, 'safe': 'active'})
-                        result = fetch_json('https://www.googleapis.com/customsearch/v1?' + args)
-                        images = [{'title': x.get('title', 'Logo'), 'url': x['link'],
-                                   'thumb': x.get('image', {}).get('thumbnailLink', x['link']),
-                                   'source': 'Google Images'} for x in result.get('items', [])
-                                  if x.get('link', '').startswith('https://')]
-                    else:
-                        args = urllib.parse.urlencode({
-                            'action': 'query', 'generator': 'search', 'gsrsearch': term,
-                            'gsrnamespace': 6, 'gsrlimit': 24, 'prop': 'imageinfo',
-                            'iiprop': 'url|mime', 'iiurlwidth': 220,
-                            'format': 'json', 'formatversion': 2})
-                        result = fetch_json('https://commons.wikimedia.org/w/api.php?' + args)
-                        images = []
-                        for page in result.get('query', {}).get('pages', []):
-                            info = (page.get('imageinfo') or [{}])[0]
-                            url = info.get('url', '')
-                            if info.get('mime', '') not in ('image/png', 'image/jpeg', 'image/webp'):
-                                continue
-                            if not url.startswith('https://'):
-                                continue
-                            images.append({'title': page.get('title', 'Logo'),
-                                           'url': url, 'thumb': info.get('thumburl', url),
-                                           'source': 'Wikimedia Commons'})
-                    for item in images:
-                        try:
-                            with Image.open(io.BytesIO(fetch_bytes(item['thumb'], limit=3_000_000))) as img:
-                                img.thumbnail((210, 210), Image.Resampling.LANCZOS)
-                                item['image'] = img.convert('RGBA').copy()
-                        except Exception:
-                            item['image'] = None
-                    def display():
-                        if not window.winfo_exists() or generation != window._generation:
-                            return
-                        window._results = images
-                        status.configure(text=f'{len(images)} images found. Select one to preview.')
-                        for index, item in enumerate(images):
-                            if item.get('image') is None:
-                                continue
-                            image = ctk.CTkImage(light_image=item['image'],
-                                                 dark_image=item['image'], size=(105, 105))
-                            window._images.append(image)
-                            button = ctk.CTkButton(
-                                grid, image=image, text='', width=126, height=126,
-                                fg_color=TILE, hover_color=HOVER,
-                                command=lambda i=index: choose(i))
-                            button.grid(row=index // 3, column=index % 3, padx=7, pady=7)
-                    window.after(0, display)
-                except Exception as error:
-                    def failed():
-                        if window.winfo_exists() and generation == window._generation:
-                            status.configure(text='Search failed: ' + str(error)[:180])
-                    window.after(0, failed)
-            threading.Thread(target=worker, daemon=True).start()
-        ctk.CTkButton(top, text='Search', width=95, height=38,
-                      fg_color=self.accent, command=search).pack(side='right')
-        query.bind('<Return>', lambda e: search())
-        window.after(150, search)
-
     def reset_logo(self, original):
         self.custom_icons.pop(original, None)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -804,7 +767,6 @@ public class ShellJumbo {
              lambda: self.toggle_favorite(original))
         item('✎', 'Rename launcher', lambda: self.edit_name(original))
         item('▧', 'Choose logo from computer', lambda: self.edit_logo(original))
-        item('⌕', 'Search online for logo...', lambda: self.search_logo(original))
         if original in self.custom_icons:
             item('↺', 'Reset logo', lambda: self.reset_logo(original))
         if original in self.renamed:
@@ -888,10 +850,10 @@ public class ShellJumbo {
             row, col = divmod(idx, cols)
             tile_size = size + 24
             card = ctk.CTkFrame(
-                self.scroll, fg_color='transparent' if compact else TILE,
+                self.scroll, fg_color='transparent' if compact else self.theme_colors['tile'],
                 corner_radius=15 if compact else 17,
                 border_width=0 if compact else 1,
-                border_color='#303B51',
+                border_color=self.theme_colors['border'],
                 width=tile_size if compact else 180,
                 height=tile_size if compact else max(150, size + 88))
             card.grid(row=row, column=col, padx=7 if compact else 9,
@@ -925,16 +887,39 @@ public class ShellJumbo {
             def launch_here(event=None, target=path):
                 if not self._dragged and not self._suppress_click:
                     self.launch(target)
-            def update_hover(tile=card):
+            def update_hover(tile=card, compact=compact):
                 if not tile.winfo_exists():
                     return
                 x, y = tile.winfo_pointerxy()
                 inside = (tile.winfo_rootx() <= x < tile.winfo_rootx() + tile.winfo_width()
                           and tile.winfo_rooty() <= y < tile.winfo_rooty() + tile.winfo_height())
-                tile.configure(
-                    fg_color=('#202B41' if inside else 'transparent') if compact
-                             else (HOVER if inside else TILE),
-                    border_color=self.accent if inside else '#303B51')
+                base = self.theme_colors['bg'] if compact else self.theme_colors['tile']
+                target = self.theme_colors['hover'] if inside else base
+                previous_job = getattr(tile, '_hover_job', None)
+                if previous_job is not None:
+                    try: tile.after_cancel(previous_job)
+                    except tk.TclError: pass
+                def rgb(c):
+                    return tuple(int(c[i:i+2],16) for i in (1,3,5))
+                try:
+                    current = tile.cget('fg_color')
+                    if not isinstance(current,str) or not current.startswith('#'):
+                        current = base
+                    a,b=rgb(current),rgb(target)
+                except (ValueError,tk.TclError):
+                    return
+                def frame(step):
+                    if not tile.winfo_exists(): return
+                    t=1-(1-step/6)**2
+                    color='#'+''.join(f'{round(v+(w-v)*t):02X}' for v,w in zip(a,b))
+                    try:
+                        tile.configure(fg_color=color,
+                                       border_color=self.accent if inside else self.theme_colors['border'])
+                        if step<6:
+                            tile._hover_job=tile.after(17,lambda:frame(step+1))
+                        else: tile._hover_job=None
+                    except tk.TclError: pass
+                frame(1)
             widgets = (card, logo) + ((title,) if title else ())
             for widget in widgets:
                 widget.bind('<ButtonPress-1>', lambda e, n=name: self.drag_start(e, n))
