@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+GameHub/build/
+GameHub/dist/
+GameHub/*.spec
+output/
