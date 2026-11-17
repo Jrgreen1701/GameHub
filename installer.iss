@@ -1,4 +1,4 @@
-#define MyAppVersion "3.6.0"
+#define MyAppVersion "3.8.0"
 [Setup]
 AppId={{1D4A906C-CA71-4C1B-912D-AD120F9285A1}
 AppName=GameHub
